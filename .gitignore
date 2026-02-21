@@ -1,0 +1,23 @@
+# Build artifacts
+build/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude Code local settings
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated data (re-producible via --profile run)
+data/validation_results.csv
+data/validation_results.json
+data/plots/*.dat
+data/plots/*.gp
+data/plots/roofline_line.dat
