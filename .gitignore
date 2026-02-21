@@ -15,6 +15,9 @@ build/
 .DS_Store
 Thumbs.db
 
+# Blog draft (WIP, not part of the framework)
+docs/blog_draft.md
+
 # Generated data (re-producible via --profile run)
 data/validation_results.csv
 data/validation_results.json
