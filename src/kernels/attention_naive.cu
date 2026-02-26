@@ -185,7 +185,8 @@ static OccupancyInfo make_occ(const char* label, const void* func,
 
     cudaFuncAttributes attr{};
     cudaFuncGetAttributes(&attr, func);
-    info.regs_per_thread  = attr.numRegs;
+    info.regs_per_thread      = attr.numRegs;
+    info.local_mem_per_thread = static_cast<int>(attr.localSizeBytes);
     info.shared_mem_bytes += static_cast<int>(attr.sharedSizeBytes);
 
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(

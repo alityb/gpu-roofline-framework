@@ -14,6 +14,7 @@ struct OccupancyInfo {
     int block_size                = 0;     // threads per block
     int shared_mem_bytes          = 0;     // static + dynamic shared memory
     int regs_per_thread           = 0;     // from cudaFuncGetAttributes
+    int local_mem_per_thread      = 0;     // from cudaFuncGetAttributes (>0 means register spill)
     int max_active_blocks_per_sm  = 0;     // from cudaOccupancyMaxActiveBlocksPerMultiprocessor
     double theoretical_occupancy  = 0.0;   // fraction of max warps [0, 1]
 };

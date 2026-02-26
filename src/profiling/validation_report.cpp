@@ -37,7 +37,9 @@ std::vector<ValidationRow> build_validation(
         if (row.kernel == "naive") {
             est = estimate_attention_naive(B, Ns, D);
         } else if (row.kernel == "tiled" || row.kernel == "tiled_db"
-                   || row.kernel == "tiled_db_k16") {
+                   || row.kernel == "tiled_db_k16"
+                   || row.kernel == "tiled_ilp2"
+                   || row.kernel == "tiled_ilp4") {
             est = estimate_attention_tiled(B, Ns, D, TQ);
         }
         row.predicted_ai    = est.arithmetic_intensity;

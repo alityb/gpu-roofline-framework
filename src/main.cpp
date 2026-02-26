@@ -25,6 +25,7 @@
 #include "kernels/attention_tiled.hpp"
 #include "kernels/attention_tiled_db.hpp"
 #include "kernels/attention_tiled_db_k16.hpp"
+#include "kernels/attention_tiled_ilp.hpp"
 #include "kernels/ssm_scan.hpp"
 
 #include "modeling/analytical_model.hpp"
@@ -55,6 +56,10 @@ static int run_profile_mode(const char* kernel_name, int N) {
         algo = std::make_unique<AttentionTiledDB>();
     } else if (std::strcmp(kernel_name, "tiled_db_k16") == 0) {
         algo = std::make_unique<AttentionTiledDBK16>();
+    } else if (std::strcmp(kernel_name, "tiled_ilp2") == 0) {
+        algo = std::make_unique<AttentionTiledILP2>();
+    } else if (std::strcmp(kernel_name, "tiled_ilp4") == 0) {
+        algo = std::make_unique<AttentionTiledILP4>();
     } else if (std::strcmp(kernel_name, "ssm") == 0) {
         algo = std::make_unique<SSMScan>();
     } else {
@@ -199,6 +204,24 @@ static void add_attention_entries(std::vector<BenchEntry>& entries,
         e.io_lower_bound = attention_io_lower_bound(B, N, D);
         entries.push_back(std::move(e));
     }
+    {
+        BenchEntry e;
+        e.label          = std::string("tiled_ilp2_") + suffix;
+        e.size           = size;
+        e.algo           = std::make_unique<AttentionTiledILP2>();
+        e.estimator      = [=]{ return estimate_attention_tiled(B, N, D, TQ); };
+        e.io_lower_bound = attention_io_lower_bound(B, N, D);
+        entries.push_back(std::move(e));
+    }
+    {
+        BenchEntry e;
+        e.label          = std::string("tiled_ilp4_") + suffix;
+        e.size           = size;
+        e.algo           = std::make_unique<AttentionTiledILP4>();
+        e.estimator      = [=]{ return estimate_attention_tiled(B, N, D, TQ); };
+        e.io_lower_bound = attention_io_lower_bound(B, N, D);
+        entries.push_back(std::move(e));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -328,19 +351,20 @@ int main(int argc, char* argv[]) {
     // Section 4 — Occupancy Diagnostics
     // =====================================================================
     std::printf("=== Occupancy Diagnostics ===\n");
-    std::printf("%-20s | %-16s | %6s | %8s | %7s | %8s | %s\n",
+    std::printf("%-20s | %-16s | %6s | %8s | %7s | %8s | %9s | %s\n",
                 "Kernel", "Sub-kernel", "Block", "Smem(B)", "Regs",
-                "Blk/SM", "Occupancy");
+                "Blk/SM", "LocalMem", "Occupancy");
     separator();
 
     for (auto& e : entries) {
         e.algo->setup(e.size);
         auto occs = e.algo->query_occupancy();
         for (auto& oc : occs) {
-            std::printf("%-20s | %-16s | %6d | %8d | %7d | %8d | %6.1f%%\n",
+            std::printf("%-20s | %-16s | %6d | %8d | %7d | %8d | %8dB | %6.1f%%\n",
                         e.label.c_str(), oc.kernel_label.c_str(),
                         oc.block_size, oc.shared_mem_bytes,
                         oc.regs_per_thread, oc.max_active_blocks_per_sm,
+                        oc.local_mem_per_thread,
                         oc.theoretical_occupancy * 100.0);
         }
         e.algo->teardown();
@@ -545,6 +569,46 @@ int main(int argc, char* argv[]) {
             sweep_data.push_back({N, "tiled_db_k16", avg_ms, gf, bw,
                                   est.arithmetic_intensity, pct, rf.is_compute_bound});
         }
+
+        // Tiled ILP2
+        {
+            AttentionTiledILP2 algo;
+            double avg_ms = time_kernel(algo, sz);
+            double runtime_s = avg_ms / 1000.0;
+            auto est = estimate_attention_tiled(B, Ns, D, TQ);
+            auto rf  = evaluate_roofline(est, hw.peak_gflops, hw.peak_bandwidth_gbs);
+            double gf = measured_gflops(est.flops, runtime_s);
+            double bw = measured_bandwidth_gbs(est.bytes, runtime_s);
+            double pct = (rf.attainable > 0) ? 100.0 * gf / rf.attainable : 0.0;
+
+            std::printf("%-8d | %-20s | %9.3f | %12.1f | %10.1f | %9.2f | %6.1f%% | %s\n",
+                        N, "tiled_ilp2", avg_ms, gf, bw,
+                        est.arithmetic_intensity, pct,
+                        rf.is_compute_bound ? "COMPUTE" : "MEMORY");
+
+            sweep_data.push_back({N, "tiled_ilp2", avg_ms, gf, bw,
+                                  est.arithmetic_intensity, pct, rf.is_compute_bound});
+        }
+
+        // Tiled ILP4
+        {
+            AttentionTiledILP4 algo;
+            double avg_ms = time_kernel(algo, sz);
+            double runtime_s = avg_ms / 1000.0;
+            auto est = estimate_attention_tiled(B, Ns, D, TQ);
+            auto rf  = evaluate_roofline(est, hw.peak_gflops, hw.peak_bandwidth_gbs);
+            double gf = measured_gflops(est.flops, runtime_s);
+            double bw = measured_bandwidth_gbs(est.bytes, runtime_s);
+            double pct = (rf.attainable > 0) ? 100.0 * gf / rf.attainable : 0.0;
+
+            std::printf("%-8d | %-20s | %9.3f | %12.1f | %10.1f | %9.2f | %6.1f%% | %s\n",
+                        N, "tiled_ilp4", avg_ms, gf, bw,
+                        est.arithmetic_intensity, pct,
+                        rf.is_compute_bound ? "COMPUTE" : "MEMORY");
+
+            sweep_data.push_back({N, "tiled_ilp4", avg_ms, gf, bw,
+                                  est.arithmetic_intensity, pct, rf.is_compute_bound});
+        }
     }
     std::printf("\n");
 
@@ -557,26 +621,32 @@ int main(int argc, char* argv[]) {
     std::printf("    Expected: Tiled AI grows as O(N) -> linear in N (regime shift at ridge)\n");
     std::printf("    Ridge point: %.2f FLOP/Byte\n\n", hw.ridge_point());
 
-    std::printf("    %-6s | %10s %10s | %10s %10s | %10s %10s | %10s %10s\n",
+    std::printf("    %-6s | %10s %10s | %10s %10s | %10s %10s | %10s %10s | %10s %10s | %10s %10s\n",
                 "N", "Naive", "GF/s", "Tiled", "GF/s",
-                "DB32", "GF/s", "DB_K16", "GF/s");
+                "DB32", "GF/s", "DB_K16", "GF/s", "ILP2", "GF/s", "ILP4", "GF/s");
     std::printf("    ");
-    for (int i = 0; i < 105; ++i) std::printf("-");
+    for (int i = 0; i < 148; ++i) std::printf("-");
     std::printf("\n");
 
     for (int N : sweep_Ns) {
         double naive_gf = 0, tiled_gf = 0, db_gf = 0, dbk16_gf = 0;
+        double ilp2_gf = 0, ilp4_gf = 0;
         for (auto& s : sweep_data) {
             if (s.N == N && s.label == "naive")        naive_gf = s.gflops;
             if (s.N == N && s.label == "tiled")        tiled_gf = s.gflops;
             if (s.N == N && s.label == "tiled_db")     db_gf    = s.gflops;
             if (s.N == N && s.label == "tiled_db_k16") dbk16_gf = s.gflops;
+            if (s.N == N && s.label == "tiled_ilp2")   ilp2_gf  = s.gflops;
+            if (s.N == N && s.label == "tiled_ilp4")   ilp4_gf  = s.gflops;
         }
         double t_n   = (naive_gf > 0) ? tiled_gf / naive_gf : 0;
         double db_t  = (tiled_gf > 0) ? db_gf    / tiled_gf : 0;
         double dbk_t = (tiled_gf > 0) ? dbk16_gf / tiled_gf : 0;
-        std::printf("    %-6d | %10.1f %9.1fx | %10.1f %9.1fx | %10.1f %9.2fx | %10.1f %9.2fx\n",
-                    N, naive_gf, 1.0, tiled_gf, t_n, db_gf, db_t, dbk16_gf, dbk_t);
+        double ilp2_t = (tiled_gf > 0) ? ilp2_gf / tiled_gf : 0;
+        double ilp4_t = (tiled_gf > 0) ? ilp4_gf / tiled_gf : 0;
+        std::printf("    %-6d | %10.1f %9.1fx | %10.1f %9.1fx | %10.1f %9.2fx | %10.1f %9.2fx | %10.1f %9.2fx | %10.1f %9.2fx\n",
+                    N, naive_gf, 1.0, tiled_gf, t_n, db_gf, db_t,
+                    dbk16_gf, dbk_t, ilp2_gf, ilp2_t, ilp4_gf, ilp4_t);
     }
     std::printf("\n");
 
@@ -632,6 +702,8 @@ int main(int argc, char* argv[]) {
             tests.push_back({"tiled",        std::make_unique<AttentionTiled>()});
             tests.push_back({"tiled_db",     std::make_unique<AttentionTiledDB>()});
             tests.push_back({"tiled_db_k16", std::make_unique<AttentionTiledDBK16>()});
+            tests.push_back({"tiled_ilp2",   std::make_unique<AttentionTiledILP2>()});
+            tests.push_back({"tiled_ilp4",   std::make_unique<AttentionTiledILP4>()});
 
             for (auto& tc : tests) {
                 tc.algo->setup(sz);
@@ -735,8 +807,9 @@ int main(int argc, char* argv[]) {
         std::printf("  ncu:    %s (via sudo)\n\n", find_ncu_path().c_str());
 
         const int ncu_Ns[]     = {128, 256, 512, 1024, 2048};
-        const char* ncu_kernels[] = {"naive", "tiled", "tiled_db", "tiled_db_k16"};
-        const int total_runs   = 4 * 5;  // 4 kernels × 5 N values
+        const char* ncu_kernels[] = {"naive", "tiled", "tiled_db", "tiled_db_k16",
+                                      "tiled_ilp2", "tiled_ilp4"};
+        const int total_runs   = 6 * 5;  // 6 kernels × 5 N values
 
         std::vector<NcuRunResult> ncu_results;
         int run_idx = 0;
@@ -786,7 +859,9 @@ int main(int argc, char* argv[]) {
             for (auto& v : vrows) {
                 if (v.N != 1024) continue;
                 if (v.kernel != "tiled" && v.kernel != "tiled_db"
-                    && v.kernel != "tiled_db_k16") continue;
+                    && v.kernel != "tiled_db_k16"
+                    && v.kernel != "tiled_ilp2"
+                    && v.kernel != "tiled_ilp4") continue;
                 double sum = v.stall_long_scoreboard + v.stall_not_selected
                            + v.stall_wait;
                 double total = (sum > 0) ? sum : 1.0;
