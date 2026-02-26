@@ -31,6 +31,10 @@ public:
     // Return occupancy info for each sub-kernel.  Call after setup().
     virtual std::vector<OccupancyInfo> query_occupancy() const { return {}; }
 
+    // For correctness validation: access the device output buffer.
+    virtual const void* device_output_ptr() const { return nullptr; }
+    virtual std::size_t device_output_bytes() const { return 0; }
+
     virtual ~Algorithm() = default;
 };
 

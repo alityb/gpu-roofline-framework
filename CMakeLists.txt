@@ -31,6 +31,7 @@ set(KERNEL_SOURCES
     src/kernels/attention_naive.cu
     src/kernels/attention_tiled.cu
     src/kernels/attention_tiled_db.cu
+    src/kernels/attention_tiled_db_k16.cu
     src/kernels/ssm_scan.cu
 )
 

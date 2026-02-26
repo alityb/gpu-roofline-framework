@@ -112,7 +112,10 @@ NcuRunResult ncu_collect(const std::string& self_path,
         "gpu__time_duration.sum,"
         "smsp__sass_thread_inst_executed_op_ffma_pred_on.sum,"
         "smsp__sass_thread_inst_executed_op_fadd_pred_on.sum,"
-        "smsp__sass_thread_inst_executed_op_fmul_pred_on.sum";
+        "smsp__sass_thread_inst_executed_op_fmul_pred_on.sum,"
+        "smsp__warps_issue_stalled_long_scoreboard.sum,"
+        "smsp__warps_issue_stalled_not_selected.sum,"
+        "smsp__warps_issue_stalled_wait.sum";
 
     char cmd[4096];
     std::snprintf(cmd, sizeof(cmd),
@@ -216,6 +219,12 @@ NcuRunResult ncu_collect(const std::string& self_path,
             km.flop_count_fadd = mval;
         else if (mname == "smsp__sass_thread_inst_executed_op_fmul_pred_on.sum")
             km.flop_count_fmul = mval;
+        else if (mname == "smsp__warps_issue_stalled_long_scoreboard.sum")
+            km.stall_long_scoreboard = mval;
+        else if (mname == "smsp__warps_issue_stalled_not_selected.sum")
+            km.stall_not_selected = mval;
+        else if (mname == "smsp__warps_issue_stalled_wait.sum")
+            km.stall_wait = mval;
     }
 
     if (kmap.empty()) {

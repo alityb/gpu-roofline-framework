@@ -36,7 +36,8 @@ std::vector<ValidationRow> build_validation(
         AnalyticalEstimate est{};
         if (row.kernel == "naive") {
             est = estimate_attention_naive(B, Ns, D);
-        } else if (row.kernel == "tiled" || row.kernel == "tiled_db") {
+        } else if (row.kernel == "tiled" || row.kernel == "tiled_db"
+                   || row.kernel == "tiled_db_k16") {
             est = estimate_attention_tiled(B, Ns, D, TQ);
         }
         row.predicted_ai    = est.arithmetic_intensity;
@@ -76,6 +77,14 @@ std::vector<ValidationRow> build_validation(
             double kb = km.total_dram_bytes();
             total_l2_weighted += km.l2_hit_rate_pct * kb;
             total_dram_for_l2 += kb;
+
+            // Stall reasons: take the max across sub-kernels (for
+            // multi-kernel naive, the dominant sub-kernel matters)
+            row.stall_long_scoreboard = std::max(row.stall_long_scoreboard,
+                                                  km.stall_long_scoreboard);
+            row.stall_not_selected    = std::max(row.stall_not_selected,
+                                                  km.stall_not_selected);
+            row.stall_wait            = std::max(row.stall_wait, km.stall_wait);
         }
 
         row.measured_dram_total = row.measured_dram_read + row.measured_dram_write;

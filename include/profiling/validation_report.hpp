@@ -55,6 +55,11 @@ struct ValidationRow {
 
     // Structural
     double pct_ridge;           // measured_ai / ridge_point * 100
+
+    // Warp stall reasons (ratio, from ncu — max across sub-kernels)
+    double stall_long_scoreboard = 0;
+    double stall_not_selected    = 0;
+    double stall_wait            = 0;
 };
 
 // ---------------------------------------------------------------------------

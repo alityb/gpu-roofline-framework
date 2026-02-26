@@ -12,6 +12,11 @@ public:
     void teardown() override;
     std::vector<OccupancyInfo> query_occupancy() const override;
 
+    const void* device_output_ptr() const override { return d_O_; }
+    std::size_t device_output_bytes() const override {
+        return static_cast<std::size_t>(B_) * N_ * D_ * sizeof(float);
+    }
+
 private:
     int   B_     = 0;      // batch_size * num_heads
     int   N_     = 0;      // seq_len

@@ -26,6 +26,11 @@ struct NcuKernelMetrics {
     double flop_count_fadd        = 0;   // smsp__sass_thread_inst_executed_op_fadd_pred_on.sum
     double flop_count_fmul        = 0;   // smsp__sass_thread_inst_executed_op_fmul_pred_on.sum
 
+    // Warp stall reasons (cumulative warp-cycles, raw counters)
+    double stall_long_scoreboard  = 0;   // smsp__warps_issue_stalled_long_scoreboard.sum
+    double stall_not_selected     = 0;   // smsp__warps_issue_stalled_not_selected.sum
+    double stall_wait             = 0;   // smsp__warps_issue_stalled_wait.sum
+
     [[nodiscard]] double total_dram_bytes() const {
         return dram_read_bytes + dram_write_bytes;
     }

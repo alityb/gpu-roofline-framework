@@ -24,6 +24,7 @@
 #include "kernels/attention_naive.hpp"
 #include "kernels/attention_tiled.hpp"
 #include "kernels/attention_tiled_db.hpp"
+#include "kernels/attention_tiled_db_k16.hpp"
 #include "kernels/ssm_scan.hpp"
 
 #include "modeling/analytical_model.hpp"
@@ -52,6 +53,8 @@ static int run_profile_mode(const char* kernel_name, int N) {
         algo = std::make_unique<AttentionTiled>();
     } else if (std::strcmp(kernel_name, "tiled_db") == 0) {
         algo = std::make_unique<AttentionTiledDB>();
+    } else if (std::strcmp(kernel_name, "tiled_db_k16") == 0) {
+        algo = std::make_unique<AttentionTiledDBK16>();
     } else if (std::strcmp(kernel_name, "ssm") == 0) {
         algo = std::make_unique<SSMScan>();
     } else {
@@ -183,7 +186,15 @@ static void add_attention_entries(std::vector<BenchEntry>& entries,
         e.label          = std::string("tiled_db_") + suffix;
         e.size           = size;
         e.algo           = std::make_unique<AttentionTiledDB>();
-        // Same analytical model: identical FLOPs and ideal-cache bytes.
+        e.estimator      = [=]{ return estimate_attention_tiled(B, N, D, TQ); };
+        e.io_lower_bound = attention_io_lower_bound(B, N, D);
+        entries.push_back(std::move(e));
+    }
+    {
+        BenchEntry e;
+        e.label          = std::string("tiled_db_k16_") + suffix;
+        e.size           = size;
+        e.algo           = std::make_unique<AttentionTiledDBK16>();
         e.estimator      = [=]{ return estimate_attention_tiled(B, N, D, TQ); };
         e.io_lower_bound = attention_io_lower_bound(B, N, D);
         entries.push_back(std::move(e));
@@ -514,6 +525,26 @@ int main(int argc, char* argv[]) {
             sweep_data.push_back({N, "tiled_db", avg_ms, gf, bw,
                                   est.arithmetic_intensity, pct, rf.is_compute_bound});
         }
+
+        // Tiled double-buffered K16
+        {
+            AttentionTiledDBK16 algo;
+            double avg_ms = time_kernel(algo, sz);
+            double runtime_s = avg_ms / 1000.0;
+            auto est = estimate_attention_tiled(B, Ns, D, TQ);
+            auto rf  = evaluate_roofline(est, hw.peak_gflops, hw.peak_bandwidth_gbs);
+            double gf = measured_gflops(est.flops, runtime_s);
+            double bw = measured_bandwidth_gbs(est.bytes, runtime_s);
+            double pct = (rf.attainable > 0) ? 100.0 * gf / rf.attainable : 0.0;
+
+            std::printf("%-8d | %-20s | %9.3f | %12.1f | %10.1f | %9.2f | %6.1f%% | %s\n",
+                        N, "tiled_db_k16", avg_ms, gf, bw,
+                        est.arithmetic_intensity, pct,
+                        rf.is_compute_bound ? "COMPUTE" : "MEMORY");
+
+            sweep_data.push_back({N, "tiled_db_k16", avg_ms, gf, bw,
+                                  est.arithmetic_intensity, pct, rf.is_compute_bound});
+        }
     }
     std::printf("\n");
 
@@ -526,27 +557,26 @@ int main(int argc, char* argv[]) {
     std::printf("    Expected: Tiled AI grows as O(N) -> linear in N (regime shift at ridge)\n");
     std::printf("    Ridge point: %.2f FLOP/Byte\n\n", hw.ridge_point());
 
-    std::printf("    %-8s | %12s %12s | %12s %12s | %12s %12s | %7s %7s\n",
-                "N", "Naive AI", "Naive GF/s", "Tiled AI", "Tiled GF/s",
-                "DB AI", "DB GF/s", "T/N", "DB/N");
+    std::printf("    %-6s | %10s %10s | %10s %10s | %10s %10s | %10s %10s\n",
+                "N", "Naive", "GF/s", "Tiled", "GF/s",
+                "DB32", "GF/s", "DB_K16", "GF/s");
     std::printf("    ");
-    for (int i = 0; i < 110; ++i) std::printf("-");
+    for (int i = 0; i < 105; ++i) std::printf("-");
     std::printf("\n");
 
     for (int N : sweep_Ns) {
-        double naive_ai = 0, naive_gf = 0;
-        double tiled_ai = 0, tiled_gf = 0;
-        double db_ai = 0, db_gf = 0;
+        double naive_gf = 0, tiled_gf = 0, db_gf = 0, dbk16_gf = 0;
         for (auto& s : sweep_data) {
-            if (s.N == N && s.label == "naive")    { naive_ai = s.ai; naive_gf = s.gflops; }
-            if (s.N == N && s.label == "tiled")    { tiled_ai = s.ai; tiled_gf = s.gflops; }
-            if (s.N == N && s.label == "tiled_db") { db_ai    = s.ai; db_gf    = s.gflops; }
+            if (s.N == N && s.label == "naive")        naive_gf = s.gflops;
+            if (s.N == N && s.label == "tiled")        tiled_gf = s.gflops;
+            if (s.N == N && s.label == "tiled_db")     db_gf    = s.gflops;
+            if (s.N == N && s.label == "tiled_db_k16") dbk16_gf = s.gflops;
         }
-        double speedup_t  = (naive_gf > 0) ? tiled_gf / naive_gf : 0.0;
-        double speedup_db = (naive_gf > 0) ? db_gf    / naive_gf : 0.0;
-        std::printf("    %-8d | %12.2f %12.1f | %12.2f %12.1f | %12.2f %12.1f | %6.1fx %6.1fx\n",
-                    N, naive_ai, naive_gf, tiled_ai, tiled_gf,
-                    db_ai, db_gf, speedup_t, speedup_db);
+        double t_n   = (naive_gf > 0) ? tiled_gf / naive_gf : 0;
+        double db_t  = (tiled_gf > 0) ? db_gf    / tiled_gf : 0;
+        double dbk_t = (tiled_gf > 0) ? dbk16_gf / tiled_gf : 0;
+        std::printf("    %-6d | %10.1f %9.1fx | %10.1f %9.1fx | %10.1f %9.2fx | %10.1f %9.2fx\n",
+                    N, naive_gf, 1.0, tiled_gf, t_n, db_gf, db_t, dbk16_gf, dbk_t);
     }
     std::printf("\n");
 
@@ -562,7 +592,81 @@ int main(int argc, char* argv[]) {
     std::printf("    (<<< = crossed ridge point at %.2f FLOP/B)\n\n", hw.ridge_point());
 
     // =====================================================================
-    // Section 9 — Summary
+    // Section 9 — Correctness Validation (vs naive reference)
+    // =====================================================================
+    std::printf("=== Correctness Validation (reference: naive, tol=1e-5) ===\n");
+    std::printf("  %-6s | %-14s | %12s | %s\n",
+                "N", "Kernel", "max_diff", "Status");
+    std::printf("  ");
+    for (int i = 0; i < 50; ++i) std::printf("-");
+    std::printf("\n");
+    {
+        const int corr_Ns[] = {128, 256, 512, 1024, 2048};
+        int pass_count = 0, total_count = 0;
+
+        for (int N : corr_Ns) {
+            ProblemSize sz;
+            sz.batch_size = 2;
+            sz.num_heads  = 4;
+            sz.seq_len    = N;
+            sz.head_dim   = 64;
+
+            // Run reference (naive)
+            AttentionNaive ref_algo;
+            ref_algo.setup(sz);
+            ref_algo.run();
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            const std::size_t out_bytes = ref_algo.device_output_bytes();
+            const std::size_t out_elems = out_bytes / sizeof(float);
+            std::vector<float> ref_out(out_elems);
+            CUDA_CHECK(cudaMemcpy(ref_out.data(), ref_algo.device_output_ptr(),
+                                  out_bytes, cudaMemcpyDeviceToHost));
+
+            // Test each tiled variant against naive
+            struct TestCase {
+                const char* label;
+                std::unique_ptr<Algorithm> algo;
+            };
+            std::vector<TestCase> tests;
+            tests.push_back({"tiled",        std::make_unique<AttentionTiled>()});
+            tests.push_back({"tiled_db",     std::make_unique<AttentionTiledDB>()});
+            tests.push_back({"tiled_db_k16", std::make_unique<AttentionTiledDBK16>()});
+
+            for (auto& tc : tests) {
+                tc.algo->setup(sz);
+                tc.algo->run();
+                CUDA_CHECK(cudaDeviceSynchronize());
+
+                std::vector<float> test_out(out_elems);
+                CUDA_CHECK(cudaMemcpy(test_out.data(), tc.algo->device_output_ptr(),
+                                      out_bytes, cudaMemcpyDeviceToHost));
+
+                float max_diff = 0.0f;
+                for (std::size_t i = 0; i < out_elems; ++i) {
+                    float diff = std::fabs(ref_out[i] - test_out[i]);
+                    if (diff > max_diff) max_diff = diff;
+                }
+
+                ++total_count;
+                const char* status = (max_diff < 1e-5f) ? "PASS" : "FAIL";
+                if (max_diff < 1e-5f) ++pass_count;
+                std::printf("  %-6d | %-14s | %12.2e | %s\n",
+                            N, tc.label, max_diff, status);
+
+                tc.algo->teardown();
+            }
+            ref_algo.teardown();
+        }
+        std::printf("  ");
+        for (int i = 0; i < 50; ++i) std::printf("-");
+        std::printf("\n");
+        std::printf("  %d/%d passed\n", pass_count, total_count);
+    }
+    std::printf("\n");
+
+    // =====================================================================
+    // Section 10 — Summary
     // =====================================================================
     auto find_row = [&](const char* label) -> MeasuredRow {
         for (auto& m : measured)
@@ -631,8 +735,8 @@ int main(int argc, char* argv[]) {
         std::printf("  ncu:    %s (via sudo)\n\n", find_ncu_path().c_str());
 
         const int ncu_Ns[]     = {128, 256, 512, 1024, 2048};
-        const char* ncu_kernels[] = {"naive", "tiled", "tiled_db"};
-        const int total_runs   = 3 * 5;  // 3 kernels × 5 N values
+        const char* ncu_kernels[] = {"naive", "tiled", "tiled_db", "tiled_db_k16"};
+        const int total_runs   = 4 * 5;  // 4 kernels × 5 N values
 
         std::vector<NcuRunResult> ncu_results;
         int run_idx = 0;
@@ -672,6 +776,30 @@ int main(int argc, char* argv[]) {
             // 5.4 Structural insight
             print_structural_insight(vrows, hw);
 
+            // 5.5 Stall breakdown: tiled vs tiled_db vs tiled_db_k16 at N=1024
+            std::printf("  5.5  Warp Stall Breakdown (N=1024 only)\n");
+            std::printf("  %-14s | %12s | %12s | %12s | %12s\n",
+                        "Kernel", "LongScorbd", "NotSelected", "FixedWait", "Total(M)");
+            std::printf("  ");
+            for (int i = 0; i < 70; ++i) std::printf("-");
+            std::printf("\n");
+            for (auto& v : vrows) {
+                if (v.N != 1024) continue;
+                if (v.kernel != "tiled" && v.kernel != "tiled_db"
+                    && v.kernel != "tiled_db_k16") continue;
+                double sum = v.stall_long_scoreboard + v.stall_not_selected
+                           + v.stall_wait;
+                double total = (sum > 0) ? sum : 1.0;
+                std::printf("  %-14s | %10.1f%% | %10.1f%% | %10.1f%% | %11.1fM\n",
+                            v.kernel.c_str(),
+                            100.0 * v.stall_long_scoreboard / total,
+                            100.0 * v.stall_not_selected / total,
+                            100.0 * v.stall_wait / total,
+                            sum / 1.0e6);
+            }
+            std::printf("  (cumulative warp-cycles; %% columns show share of the 3 stall types)\n");
+            std::printf("  LongScorbd = waiting on L1TEX/global mem; FixedWait = execution pipe latency\n\n");
+
             // Compute summary statistics for narrative
             double max_naive_redund = 0;
             double max_meas_naive_redund = 0;
@@ -694,8 +822,8 @@ int main(int argc, char* argv[]) {
                 if (ng > 0) max_tiled_speedup = std::max(max_tiled_speedup, tg / ng);
             }
 
-            // 5.5 Exports — use project root derived from binary path
-            std::printf("  5.5  Exports\n");
+            // 5.6 Exports — use project root derived from binary path
+            std::printf("  5.6  Exports\n");
             std::string proj_dir = self;
             auto slash = proj_dir.rfind('/');
             if (slash != std::string::npos) proj_dir = proj_dir.substr(0, slash);
@@ -711,8 +839,8 @@ int main(int argc, char* argv[]) {
             generate_plot_data(vrows, hw, plots_dir);
             std::printf("\n");
 
-            // 5.6 Blog-ready narrative summary
-            std::printf("  5.6  Blog-Ready Narrative\n\n");
+            // 5.7 Blog-ready narrative summary
+            std::printf("  5.7  Blog-Ready Narrative\n\n");
             std::printf("    \"Naive attention wastes up to %.0fx measured DRAM traffic\n",
                         max_meas_naive_redund);
             std::printf("    over the IO lower bound (%.0fx analytical). The tiled kernel\n",

@@ -4,7 +4,7 @@
 
 namespace gpu_align {
 
-class AttentionTiled : public Algorithm {
+class AttentionTiledDBK16 : public Algorithm {
 public:
     std::string name() const override;
     void setup(const ProblemSize& size) override;
@@ -18,16 +18,15 @@ public:
     }
 
 private:
-    int   B_     = 0;      // batch_size * num_heads
-    int   N_     = 0;      // seq_len
-    int   D_     = 0;      // head_dim
-    float scale_ = 1.0f;   // 1 / sqrt(head_dim)
+    int   B_     = 0;
+    int   N_     = 0;
+    int   D_     = 0;
+    float scale_ = 1.0f;
 
     float* d_Q_ = nullptr;
     float* d_K_ = nullptr;
     float* d_V_ = nullptr;
     float* d_O_ = nullptr;
-    // NOTE: No d_S_ — the N×N score matrix is never materialized in global memory.
 };
 
 } // namespace gpu_align
