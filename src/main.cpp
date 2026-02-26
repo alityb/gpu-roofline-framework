@@ -23,6 +23,7 @@
 
 #include "kernels/attention_naive.hpp"
 #include "kernels/attention_tiled.hpp"
+#include "kernels/attention_tiled_db.hpp"
 #include "kernels/ssm_scan.hpp"
 
 #include "modeling/analytical_model.hpp"
@@ -49,6 +50,8 @@ static int run_profile_mode(const char* kernel_name, int N) {
         algo = std::make_unique<AttentionNaive>();
     } else if (std::strcmp(kernel_name, "tiled") == 0) {
         algo = std::make_unique<AttentionTiled>();
+    } else if (std::strcmp(kernel_name, "tiled_db") == 0) {
+        algo = std::make_unique<AttentionTiledDB>();
     } else if (std::strcmp(kernel_name, "ssm") == 0) {
         algo = std::make_unique<SSMScan>();
     } else {
@@ -171,6 +174,16 @@ static void add_attention_entries(std::vector<BenchEntry>& entries,
         e.label          = std::string("tiled_") + suffix;
         e.size           = size;
         e.algo           = std::make_unique<AttentionTiled>();
+        e.estimator      = [=]{ return estimate_attention_tiled(B, N, D, TQ); };
+        e.io_lower_bound = attention_io_lower_bound(B, N, D);
+        entries.push_back(std::move(e));
+    }
+    {
+        BenchEntry e;
+        e.label          = std::string("tiled_db_") + suffix;
+        e.size           = size;
+        e.algo           = std::make_unique<AttentionTiledDB>();
+        // Same analytical model: identical FLOPs and ideal-cache bytes.
         e.estimator      = [=]{ return estimate_attention_tiled(B, N, D, TQ); };
         e.io_lower_bound = attention_io_lower_bound(B, N, D);
         entries.push_back(std::move(e));
@@ -481,6 +494,26 @@ int main(int argc, char* argv[]) {
             sweep_data.push_back({N, "tiled", avg_ms, gf, bw,
                                   est.arithmetic_intensity, pct, rf.is_compute_bound});
         }
+
+        // Tiled double-buffered
+        {
+            AttentionTiledDB algo;
+            double avg_ms = time_kernel(algo, sz);
+            double runtime_s = avg_ms / 1000.0;
+            auto est = estimate_attention_tiled(B, Ns, D, TQ);
+            auto rf  = evaluate_roofline(est, hw.peak_gflops, hw.peak_bandwidth_gbs);
+            double gf = measured_gflops(est.flops, runtime_s);
+            double bw = measured_bandwidth_gbs(est.bytes, runtime_s);
+            double pct = (rf.attainable > 0) ? 100.0 * gf / rf.attainable : 0.0;
+
+            std::printf("%-8d | %-20s | %9.3f | %12.1f | %10.1f | %9.2f | %6.1f%% | %s\n",
+                        N, "tiled_db", avg_ms, gf, bw,
+                        est.arithmetic_intensity, pct,
+                        rf.is_compute_bound ? "COMPUTE" : "MEMORY");
+
+            sweep_data.push_back({N, "tiled_db", avg_ms, gf, bw,
+                                  est.arithmetic_intensity, pct, rf.is_compute_bound});
+        }
     }
     std::printf("\n");
 
@@ -493,21 +526,27 @@ int main(int argc, char* argv[]) {
     std::printf("    Expected: Tiled AI grows as O(N) -> linear in N (regime shift at ridge)\n");
     std::printf("    Ridge point: %.2f FLOP/Byte\n\n", hw.ridge_point());
 
-    std::printf("    %-8s | %12s %12s | %12s %12s | %10s\n",
-                "N", "Naive AI", "Naive GF/s", "Tiled AI", "Tiled GF/s", "Speedup");
+    std::printf("    %-8s | %12s %12s | %12s %12s | %12s %12s | %7s %7s\n",
+                "N", "Naive AI", "Naive GF/s", "Tiled AI", "Tiled GF/s",
+                "DB AI", "DB GF/s", "T/N", "DB/N");
     std::printf("    ");
-    for (int i = 0; i < 75; ++i) std::printf("-");
+    for (int i = 0; i < 110; ++i) std::printf("-");
     std::printf("\n");
 
     for (int N : sweep_Ns) {
-        double naive_ai = 0, naive_gf = 0, tiled_ai = 0, tiled_gf = 0;
+        double naive_ai = 0, naive_gf = 0;
+        double tiled_ai = 0, tiled_gf = 0;
+        double db_ai = 0, db_gf = 0;
         for (auto& s : sweep_data) {
-            if (s.N == N && s.label == "naive") { naive_ai = s.ai; naive_gf = s.gflops; }
-            if (s.N == N && s.label == "tiled") { tiled_ai = s.ai; tiled_gf = s.gflops; }
+            if (s.N == N && s.label == "naive")    { naive_ai = s.ai; naive_gf = s.gflops; }
+            if (s.N == N && s.label == "tiled")    { tiled_ai = s.ai; tiled_gf = s.gflops; }
+            if (s.N == N && s.label == "tiled_db") { db_ai    = s.ai; db_gf    = s.gflops; }
         }
-        double speedup = (naive_gf > 0) ? tiled_gf / naive_gf : 0.0;
-        std::printf("    %-8d | %12.2f %12.1f | %12.2f %12.1f | %9.1fx\n",
-                    N, naive_ai, naive_gf, tiled_ai, tiled_gf, speedup);
+        double speedup_t  = (naive_gf > 0) ? tiled_gf / naive_gf : 0.0;
+        double speedup_db = (naive_gf > 0) ? db_gf    / naive_gf : 0.0;
+        std::printf("    %-8d | %12.2f %12.1f | %12.2f %12.1f | %12.2f %12.1f | %6.1fx %6.1fx\n",
+                    N, naive_ai, naive_gf, tiled_ai, tiled_gf,
+                    db_ai, db_gf, speedup_t, speedup_db);
     }
     std::printf("\n");
 
@@ -592,8 +631,8 @@ int main(int argc, char* argv[]) {
         std::printf("  ncu:    %s (via sudo)\n\n", find_ncu_path().c_str());
 
         const int ncu_Ns[]     = {128, 256, 512, 1024, 2048};
-        const char* ncu_kernels[] = {"naive", "tiled"};
-        const int total_runs   = 2 * 5;  // 2 kernels × 5 N values
+        const char* ncu_kernels[] = {"naive", "tiled", "tiled_db"};
+        const int total_runs   = 3 * 5;  // 3 kernels × 5 N values
 
         std::vector<NcuRunResult> ncu_results;
         int run_idx = 0;
